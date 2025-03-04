@@ -52,7 +52,9 @@ func NewServer(addr string, apex bool) *Server {
 }
 
 const (
-	ApexAddr = "0.0.0.0:3000"
+	ListenAnyAddr = "0.0.0.0:3000"
+	ApexAddr      = "p2p.yieldsoftomorrow.world:3000"
+	AuxAddr       = "127.0.0.1:"
 )
 
 func (s *Server) Start() {
@@ -258,17 +260,19 @@ func (s *Server) handleMessages() {
 func (s *Server) dialServer(addr string) {
 	con, err := net.Dial("tcp", addr)
 	if err != nil {
-		slog.Error("could not dial into the server", "FROM", s.Addr, "TO", addr)
+		slog.Error("could not dial into the server", "FROM", s.Addr, "TO", addr, "err", err)
+		return // Prevent nil pointer dereference
 	}
 
 	sAddr := con.RemoteAddr().String()
 	fmt.Println("trying to dial to", sAddr)
+
 	if _, found := s.ServerMap[sAddr]; found {
 		fmt.Println("already found heree", sAddr)
 		return
-	} else {
-		s.ServerMap[sAddr] = Server{Addr: sAddr, con: con}
 	}
+
+	s.ServerMap[sAddr] = Server{Addr: sAddr, con: con}
 
 	msg := Message{
 		con:        con,
@@ -279,7 +283,9 @@ func (s *Server) dialServer(addr string) {
 	jsonData, err := json.Marshal(msg)
 	if err != nil {
 		slog.Error("could not marshal the server struct", "err", err)
+		return
 	}
+
 	con.Write(append(jsonData, '\n'))
 	s.handleConnection(con)
 }
@@ -293,13 +299,13 @@ func (s *Server) connectOtherNodes() {
 func main() {
 	apexFlag := flag.Bool("apex", false, "--apex | --apex=true | --apex=false [default false]")
 	pingFlag := flag.Bool("ping", false, "--ping | --ping=true | --ping=false [default false]")
-	addrFlag := flag.String("addr", "127.0.0.1:3001", "--addr=127.0.0.1:3001  [default 127.0.0.1:]")
+	addrFlag := flag.String("addr", AuxAddr, "--addr=127.0.0.1:3001  [default 127.0.0.1:]")
 	flag.Parse()
 
 	var server *Server
 	if *apexFlag {
-		server = NewServer(ApexAddr, true)
-		if *addrFlag == ApexAddr {
+		server = NewServer(ListenAnyAddr, true)
+		if *addrFlag == ListenAnyAddr {
 			slog.Info("addr is fixed on the apex server [127.0.0.1:3000]")
 		}
 	} else {
