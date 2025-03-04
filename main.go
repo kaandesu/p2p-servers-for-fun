@@ -17,7 +17,7 @@ type (
 	Server struct {
 		ln         net.Listener
 		con        net.Conn
-		serverMap  map[string]Server
+		ServerMap  map[string]Server
 		done       chan os.Signal
 		msgch      chan Message
 		Addr       string
@@ -36,13 +36,14 @@ type (
 const (
 	AnyMsg MessageType = iota
 	ServerRegisterMsg
+	UpdateServerListMsg
 )
 
 func NewServer(addr string, apex bool) *Server {
 	s := &Server{
 		Addr:      addr,
 		IsApex:    apex,
-		serverMap: make(map[string]Server),
+		ServerMap: make(map[string]Server),
 		msgch:     make(chan Message),
 		done:      make(chan os.Signal),
 	}
@@ -58,14 +59,18 @@ const (
 func (s *Server) Start() {
 	var err error
 	s.ln, err = net.Listen("tcp", s.Addr)
+
+	if !s.IsApex {
+		s.Addr = s.ln.Addr().String()
+	}
 	if err != nil {
 		slog.Error("could not start the server", "err", err)
 	}
 
+	slog.Info("Starting the server on", "addr", s.Addr, "err", err)
+
 	go s.accept()
 	go s.handleMessages()
-
-	slog.Info("Starting the server on", "addr", s.Addr, "err", err)
 
 	if !s.IsApex {
 		fmt.Println("Dialing")
@@ -111,6 +116,7 @@ func (s *Server) accept() {
 }
 
 func (s *Server) pingPong() {
+	slog.Info("[sending ping]", "from", s.Addr)
 	tempMessage := Message{
 		MsgType: AnyMsg,
 		con:     s.con,
@@ -118,27 +124,89 @@ func (s *Server) pingPong() {
 	}
 
 	jsonData, _ := json.Marshal(tempMessage)
-	for _, server := range s.serverMap {
+	for _, server := range s.ServerMap {
 		server.con.Write(jsonData)
+	}
+}
+
+func (s *Server) sendServerListTo(con net.Conn) {
+	if con == nil || !s.IsApex {
+		return
+	}
+
+	var serverList []string
+	for addr := range s.ServerMap {
+		serverList = append(serverList, addr)
+	}
+
+	payload, err := json.Marshal(serverList)
+	if err != nil {
+		slog.Error("[sendServerListTo] Marshal error", "err", err)
+		return
+	}
+
+	newMsg := &Message{
+		con:     s.con,
+		MsgType: UpdateServerListMsg,
+		Payload: payload,
+	}
+
+	jsonData, err := json.Marshal(newMsg)
+	if err != nil {
+		slog.Error("[sendServerListTo] Marshal error", "err", err)
+		return
+	}
+
+	con.Write(jsonData)
+}
+
+func (s *Server) updateServerList(serverMap []string) {
+	s.ServerMap = map[string]Server{}
+	for _, addr := range serverMap {
+		fmt.Println("adding the addr", addr)
+		s.ServerMap[addr] = Server{Addr: addr}
 	}
 }
 
 func (s *Server) handleConnection(con net.Conn) {
 	sAddr := con.RemoteAddr().String()
 	slog.Info("Handling Connection", "ADDR", sAddr)
-	if _, found := s.serverMap[sAddr]; !found {
-		s.serverMap[sAddr] = Server{
-			con: con,
+	if _, found := s.ServerMap[sAddr]; !found {
+		s.ServerMap[sAddr] = Server{
+			con:  con,
+			Addr: con.RemoteAddr().String(),
 		}
-		// go s.dialServer(sAddr)
+
+		if s.IsApex {
+			fmt.Println("registered addresses")
+			for adr, server := range s.ServerMap {
+				go s.sendServerListTo(server.con)
+				fmt.Println(adr)
+			}
+			fmt.Println("-------------")
+		}
 	}
 	buf := make([]byte, 2048)
 	defer func() {
+		slog.Info("Node disconnected", "addr", sAddr)
+		slog.Info("Server list prev len", "len", len(s.ServerMap))
+		delete(s.ServerMap, sAddr)
+		slog.Info("Server list after len", "len", len(s.ServerMap))
+		if s.IsApex {
+			slog.Info("Sending server lists to other nodes", "addr", sAddr)
+			for _, server := range s.ServerMap {
+				s.sendServerListTo(server.con)
+				fmt.Println("registered addresses")
+				for adr := range s.ServerMap {
+					fmt.Println(adr)
+				}
+				fmt.Println("-------------")
+			}
+
+		}
 		if con != nil {
 			con.Close()
-			delete(s.serverMap, sAddr)
 		}
-		slog.Info("Node disconnected", "addr", sAddr)
 	}()
 	for {
 		n, err := con.Read(buf)
@@ -147,6 +215,7 @@ func (s *Server) handleConnection(con net.Conn) {
 		}
 
 		s.msgch <- Message{
+			MsgType: AnyMsg,
 			con:     con,
 			Payload: buf[:n],
 		}
@@ -156,18 +225,37 @@ func (s *Server) handleConnection(con net.Conn) {
 func (s *Server) handleMessages() {
 	var temMsg Message
 	for msg := range s.msgch {
-		if err := json.Unmarshal(msg.Payload, &temMsg); err != nil {
-			slog.Error("could not unmarshal the recieved payload", "err", err)
+		if msg.Payload != nil {
+			if err := json.Unmarshal(msg.Payload, &temMsg); err != nil {
+				slog.Error("could not unmarshal the recieved payload", "err", err, "msg", string(msg.Payload))
+			}
 		}
 		switch temMsg.MsgType {
 		case AnyMsg:
-			fmt.Printf(">>[ANY MESSAGE] %s:\n\t%s\n", msg.con.RemoteAddr().String(), string(msg.Payload))
+			fmt.Printf(">>[Discarding msg]:\n\t %s", msg.con.RemoteAddr().String())
 		case ServerRegisterMsg:
 			newServer := temMsg.ServerData
 			newServer.con = msg.con
 			newServer.Addr = msg.con.RemoteAddr().String()
-			s.serverMap[newServer.Addr] = newServer
-			fmt.Printf(">>[ADDED] %s:\n\t%+v\n", msg.con.RemoteAddr().String(), newServer)
+			s.ServerMap[newServer.Addr] = newServer
+			fmt.Printf(">>[New Server Registered]:\n\t %s\n", msg.con.RemoteAddr().String())
+		case UpdateServerListMsg:
+			fmt.Println("before", len(s.ServerMap))
+
+			newServer := temMsg.ServerData
+			var serverList []string
+			if err := json.Unmarshal(temMsg.Payload, &serverList); err != nil {
+				slog.Error("could not unmarshal server list payload", "err", err)
+				break
+			}
+			s.updateServerList(serverList)
+			slog.Info("[Updated Server List]", "from", msg.con.RemoteAddr().String())
+			fmt.Printf(">>[GotUpdateList] %s:\n\tlen:%d\n", msg.con.RemoteAddr().String(), len(newServer.ServerMap))
+			fmt.Println("after", len(s.ServerMap))
+			for adr := range s.ServerMap {
+				fmt.Println(adr)
+			}
+			// TODO: connect to those if you havent already
 
 		}
 	}
@@ -181,16 +269,15 @@ func (s *Server) dialServer(addr string) {
 
 	sAddr := con.RemoteAddr().String()
 	fmt.Println("trying to dial to", sAddr)
-	if _, found := s.serverMap[sAddr]; found {
+	if _, found := s.ServerMap[sAddr]; found {
 		fmt.Println("already found heree", sAddr)
 		return
 	} else {
-		s.serverMap[sAddr] = Server{Addr: sAddr, con: con}
+		s.ServerMap[sAddr] = Server{Addr: sAddr, con: con}
 	}
 
 	msg := Message{
 		con:        con,
-		Payload:    []byte{},
 		MsgType:    ServerRegisterMsg,
 		ServerData: *s,
 	}
@@ -199,7 +286,7 @@ func (s *Server) dialServer(addr string) {
 	if err != nil {
 		slog.Error("could not marshal the server struct", "err", err)
 	}
-	con.Write(jsonData)
+	con.Write(append(jsonData, '\n'))
 	s.handleConnection(con)
 }
 
