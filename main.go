@@ -52,17 +52,12 @@ func NewServer(addr string, apex bool) *Server {
 }
 
 const (
-	AuxAddr  = "127.0.0.1:"
-	ApexAddr = "127.0.0.1:3000"
+	ApexAddr = "0.0.0.0:3000"
 )
 
 func (s *Server) Start() {
 	var err error
 	s.ln, err = net.Listen("tcp", s.Addr)
-
-	if !s.IsApex {
-		s.Addr = s.ln.Addr().String()
-	}
 	if err != nil {
 		slog.Error("could not start the server", "err", err)
 	}
@@ -196,7 +191,7 @@ func (s *Server) handleConnection(con net.Conn) {
 			slog.Info("Sending server lists to other nodes", "addr", sAddr)
 			for _, server := range s.ServerMap {
 				s.sendServerListTo(server.con)
-				fmt.Println("registered addresses")
+				fmt.Println("-------registered addresses-------")
 				for adr := range s.ServerMap {
 					fmt.Println(adr)
 				}
@@ -255,7 +250,6 @@ func (s *Server) handleMessages() {
 			for adr := range s.ServerMap {
 				fmt.Println(adr)
 			}
-			// TODO: connect to those if you havent already
 
 		}
 	}
@@ -290,16 +284,26 @@ func (s *Server) dialServer(addr string) {
 	s.handleConnection(con)
 }
 
+func (s *Server) connectOtherNodes() {
+	for addr := range s.ServerMap {
+		go s.dialServer(addr)
+	}
+}
+
 func main() {
 	apexFlag := flag.Bool("apex", false, "--apex | --apex=true | --apex=false [default false]")
 	pingFlag := flag.Bool("ping", false, "--ping | --ping=true | --ping=false [default false]")
+	addrFlag := flag.String("addr", "127.0.0.1:3001", "--addr=127.0.0.1:3001  [default 127.0.0.1:]")
 	flag.Parse()
 
 	var server *Server
 	if *apexFlag {
 		server = NewServer(ApexAddr, true)
+		if *addrFlag == ApexAddr {
+			slog.Info("addr is fixed on the apex server [127.0.0.1:3000]")
+		}
 	} else {
-		server = NewServer(AuxAddr, false)
+		server = NewServer(*addrFlag, false)
 	}
 
 	if *pingFlag {
